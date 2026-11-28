@@ -42,3 +42,6 @@ next-env.d.ts
 
 # manter o exemplo de variáveis no repositório
 !.env.example
+
+# python
+__pycache__/
