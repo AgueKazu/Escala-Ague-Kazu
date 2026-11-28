@@ -1,104 +1,246 @@
-"""Gera a planilha Excel da escala (calendários por setor e mês, resumo e conferência)."""
+"""Gera a planilha Excel da escala: Regras, Pendências e um calendário por setor e mês (14 abas)."""
 
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from modelo import COLETIVA, DATAS_ESPECIAIS, DIAS, DOBRA, DOMINGO, FECHADO, NOMES_DIA
-
-CORES = {
-    "cinza": "D9D9D9",
-    "F": "FF7B7B",  # folga semanal (vermelho)
-    "X": "8FD18F",  # fechado (verde)
-    "B": "FFB25B",  # dobra (laranja)
-    "D": "F9C6DD",  # domingo (rosa)
-    "M": "BDD7EE",  # cobertura da manhã por Daniel (azul claro)
-    "T": "FFFFFF",
-    "titulo": "1F3864",
-    "alerta": "FFC7CE",
-}
-
-LEGENDA = [
-    ("T", "Trabalho em horário normal"),
-    ("F", "Folga semanal"),
-    ("X", "Restaurante fechado (não conta como folga)"),
-    ("B", f"Dobra ({DOBRA}, 2h de intervalo)"),
-    ("D", f"Horário de domingo ({DOMINGO})"),
-    ("M", "Daniel cobrindo o turno da manhã (Pia)"),
-]
-
-MESES = {
-    "Dez": ("Dezembro/2026 (30/11 a 31/12)", [i for i, x in enumerate(DIAS) if x.month in (11, 12)]),
-    "Jan": ("Janeiro/2027 (01/01 a 31/01)", [i for i, x in enumerate(DIAS) if x.month == 1]),
-}
+from apresentacao import (
+    CORES, LEGENDA, MESES, PADRONIZACAO, PONTOS_DE_ATENCAO, REGRAS_GERAIS, SETORES_RESUMO,
+    agrupar_pendencias, turno_legivel,
+)
+from modelo import COLETIVA, DATAS_ESPECIAIS, DIAS, FECHADO, NOMES_DIA
 
 fino = Side(style="thin", color="BFBFBF")
 BORDA = Border(left=fino, right=fino, top=fino, bottom=fino)
 CENTRO = Alignment(horizontal="center", vertical="center")
+QUEBRA = Alignment(vertical="top", wrap_text=True)
+NOMES_DIA_LONGO = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 
 def preencher(cor):
     return PatternFill("solid", start_color=cor, end_color=cor)
 
 
-def nome_aba(setor, mes):
-    return f"{setor} {mes}"
+def cabecalho(ws, linha, textos, larguras=None):
+    for c, txt in enumerate(textos, 1):
+        cel = ws.cell(row=linha, column=c, value=txt)
+        cel.font = Font(bold=True)
+        cel.fill = preencher(CORES["cinza"])
+        cel.border = BORDA
+        cel.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    if larguras:
+        for c, w in enumerate(larguras, 1):
+            ws.column_dimensions[get_column_letter(c)].width = w
 
 
-def turno_legivel(p):
-    return {"manha": "Manhã", "noite": "Noite", "salao": "Salão", "cobertura": "Cobertura"}[p.turno]
+def secao(ws, linha, texto):
+    ws.cell(row=linha, column=1, value=texto).font = Font(bold=True, size=12, color=CORES["titulo"])
+    return linha + 1
 
 
-def regras_de_cor(ws, intervalo):
-    for cod in ("F", "X", "B", "D", "M"):
+def regras_de_cor(ws, intervalo, primeira_celula):
+    for cod in ("F", "H", "D", "DS"):
         ws.conditional_formatting.add(
             intervalo,
             CellIsRule(operator="equal", formula=[f'"{cod}"'], fill=preencher(CORES[cod]),
-                       font=Font(bold=cod in ("F", "B"))),
-        )
+                       font=Font(bold=cod in ("F", "D", "DS"))))
+    # Domingo trabalhado em rosa
+    ws.conditional_formatting.add(
+        intervalo,
+        CellIsRule(operator="equal", formula=['"S"'], fill=preencher(CORES["S"])))
 
 
-def aba_calendario(wb, setor, mes, pessoas, totais):
+# ---------------------------------------------------------------------------
+def aba_regras(wb, setores):
+    ws = wb.active
+    ws.title = "Regras"
+    ws["A1"] = "Escala de trabalho 5x2 — Dezembro/2026 e Janeiro/2027"
+    ws["A1"].font = Font(bold=True, size=16, color=CORES["titulo"])
+    ws["A2"] = ("Organizada por setor, com controle individual de horários, folgas semanais, folgas "
+                "dominicais, dobras e quantidade de colaboradores disponíveis para cada turno.")
+    ws["A2"].font = Font(italic=True, color="595959")
+    r = 4
+
+    r = secao(ws, r, "1. Regras gerais da escala")
+    for txt in REGRAS_GERAIS:
+        ws.cell(row=r, column=1, value="•").alignment = CENTRO
+        ws.cell(row=r, column=2, value=txt)
+        r += 1
+    r += 1
+
+    r = secao(ws, r, "Datas especiais")
+    cabecalho(ws, r, ["Data", "Dia da semana", "Consideração"])
+    r += 1
+    for data, txt in DATAS_ESPECIAIS:
+        c = ws.cell(row=r, column=1, value=data)
+        c.number_format = "dd/mm/yyyy"
+        ws.cell(row=r, column=2, value=NOMES_DIA_LONGO[data.weekday()])
+        ws.cell(row=r, column=3, value=txt)
+        cor = CORES["H"] if "fechado" in txt else (CORES["F"] if "Folga" in txt else CORES["S"])
+        for k in range(1, 4):
+            ws.cell(row=r, column=k).border = BORDA
+        ws.cell(row=r, column=1).fill = preencher(cor)
+        r += 1
+    r += 1
+
+    r = secao(ws, r, "Padronização visual")
+    for chave, cor, txt in PADRONIZACAO:
+        c = ws.cell(row=r, column=1, value=cor)
+        c.fill = preencher(CORES[chave])
+        c.border = BORDA
+        c.font = Font(bold=True)
+        ws.cell(row=r, column=2, value=txt)
+        r += 1
+    r += 1
+
+    r = secao(ws, r, "3. Organização dos setores")
+    cabecalho(ws, r, ["Setor", "Colaboradores"])
+    r += 1
+    for nome, n in SETORES_RESUMO:
+        ws.cell(row=r, column=1, value=nome).border = BORDA
+        c = ws.cell(row=r, column=2, value=n)
+        c.border = BORDA
+        c.alignment = CENTRO
+        r += 1
+    ws.cell(row=r, column=1, value="Total").font = Font(bold=True)
+    c = ws.cell(row=r, column=2, value=f"=SUM(B{r - len(SETORES_RESUMO)}:B{r - 1})")
+    c.font = Font(bold=True)
+    c.alignment = CENTRO
+    r += 2
+
+    r = secao(ws, r, "4. Legenda dos horários")
+    cabecalho(ws, r, ["Código", "Descrição", "Horário", "Intervalo"])
+    r += 1
+    for cod, desc, hor, intv in LEGENDA:
+        c = ws.cell(row=r, column=1, value=cod)
+        c.font = Font(bold=True)
+        c.alignment = CENTRO
+        if cod in CORES:
+            c.fill = preencher(CORES[cod])
+        for k, v in enumerate((desc, hor, intv), 2):
+            ws.cell(row=r, column=k, value=v).border = BORDA
+        c.border = BORDA
+        r += 1
+    r += 1
+
+    r = secao(ws, r, "5. Pontos de atenção antes da aprovação")
+    for txt in PONTOS_DE_ATENCAO:
+        ws.cell(row=r, column=1, value="•").alignment = Alignment(horizontal="center", vertical="top")
+        c = ws.cell(row=r, column=2, value=txt)
+        c.alignment = QUEBRA
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = 30 if len(txt) > 100 else 16
+        r += 1
+    r += 1
+
+    r = secao(ws, r, "Equipe e restrições individuais")
+    cabecalho(ws, r, ["Setor", "Colaborador", "Turno", "Horário", "Intervalo", "Restrição / observação"])
+    r += 1
+    for setor, pessoas in setores:
+        for p in pessoas:
+            for c, txt in enumerate([setor, p.nome, turno_legivel(p), p.horario, p.intervalo,
+                                     p.observacao], 1):
+                ws.cell(row=r, column=c, value=txt).border = BORDA
+            r += 1
+
+    for col, w in zip("ABCDEF", (16, 22, 14, 14, 11, 60)):
+        ws.column_dimensions[col].width = w
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
+# ---------------------------------------------------------------------------
+def aba_pendencias(wb, ocorrencias):
+    ws = wb.create_sheet("Pendências", 1)
+    pend = agrupar_pendencias(ocorrencias)
+    ws["A1"] = f"Pendências da escala proposta ({len(pend)})"
+    ws["A1"].font = Font(bold=True, size=14, color=CORES["titulo"])
+    ws["A2"] = ("Pendência obrigatória = regra que não pôde ser cumprida por conflito entre as próprias "
+                "regras · Preferência não atendida = algo pedido como 'sempre que possível'.")
+    ws["A2"].font = Font(italic=True, size=9, color="595959")
+    cabecalho(ws, 4, ["Nº", "Tipo", "Setor", "Regra", "Colaboradores", "Datas", "Detalhe", "Decisão"],
+              [5, 16, 10, 28, 22, 22, 80, 22])
+    cores_tipo = {"Pendência obrigatória": "FFC7CE", "Preferência não atendida": "FFEB9C"}
+    r = 5
+    for n, o in enumerate(pend, 1):
+        vals = [n, o["tipo"], o["setor"], o["regra"], o["pessoas"], o["datas"], o["detalhe"], ""]
+        for c, v in enumerate(vals, 1):
+            cel = ws.cell(row=r, column=c, value=v)
+            cel.border = BORDA
+            cel.alignment = QUEBRA
+        ws.cell(row=r, column=1).alignment = Alignment(horizontal="center", vertical="top")
+        ws.cell(row=r, column=2).fill = preencher(cores_tipo[o["tipo"]])
+        linhas = max(len(o["detalhe"]) // 90 + 1, len(o["datas"]) // 24 + 1, len(o["regra"]) // 30 + 1)
+        ws.row_dimensions[r].height = 15 * min(linhas, 8)
+        r += 1
+    ws.freeze_panes = "A5"
+    ws.auto_filter.ref = f"A4:H{max(r - 1, 4)}"
+
+    r += 1
+    ws.cell(row=r, column=1, value="Situações já previstas pelas próprias regras (não são pendências)").font = \
+        Font(bold=True, size=12, color=CORES["titulo"])
+    r += 1
+    cabecalho(ws, r, ["", "Setor", "Colaborador", "Regra", "Data", "", "Detalhe"])
+    r += 1
+    for o in (o for o in ocorrencias if o["tipo"] == "Aceita"):
+        for c, v in ((2, o["setor"]), (3, o["pessoa"]), (4, o["regra"]), (5, o["data"]), (7, o["detalhe"])):
+            cel = ws.cell(row=r, column=c, value=v)
+            cel.border = BORDA
+            cel.alignment = QUEBRA
+        ws.cell(row=r, column=1).fill = preencher("E2EFDA")
+        r += 1
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    return len(pend)
+
+
+# ---------------------------------------------------------------------------
+def aba_calendario(wb, setor, mes, pessoas):
     titulo, dias = MESES[mes]
-    ws = wb.create_sheet(nome_aba(setor, mes))
+    ws = wb.create_sheet(f"{setor} {mes}")
     ws["A1"] = f"{setor} — {titulo}"
     ws["A1"].font = Font(bold=True, size=14, color=CORES["titulo"])
-    ws["A2"] = "Escala 5×2 · Restaurante Kazu · códigos: T F X B D M (veja a aba Legenda)"
+    ws["A2"] = ("M manhã · N noite · I integral · S domingo · D dobra · DS cobertura domingo · "
+                "F folga · H fechado (horários na aba Regras)")
     ws["A2"].font = Font(italic=True, size=9, color="595959")
 
+    L = get_column_letter
     col0 = 5  # coluna E
-    linha_data, linha_dia, linha_obs = 4, 5, 3
-    cab = ["Colaborador", "Turno", "Horário", "Intervalo"]
-    for c, txt in enumerate(cab, start=1):
+    linha_obs, linha_data, linha_dia = 3, 4, 5
+    for c, txt in enumerate(["Colaborador", "Turno", "Horário", "Intervalo"], 1):
         cel = ws.cell(row=linha_data, column=c, value=txt)
         ws.merge_cells(start_row=linha_data, start_column=c, end_row=linha_dia, end_column=c)
         cel.font = Font(bold=True)
         cel.fill = preencher(CORES["cinza"])
         cel.alignment = CENTRO
-        ws.cell(row=linha_dia, column=c).fill = preencher(CORES["cinza"])
 
     for k, i in enumerate(dias):
         c = col0 + k
         data = ws.cell(row=linha_data, column=c, value=DIAS[i])
         data.number_format = "dd/mm"
         dia = ws.cell(row=linha_dia, column=c, value=NOMES_DIA[DIAS[i].weekday()])
-        cor = CORES["D"] if DIAS[i].weekday() == 6 else CORES["cinza"]
+        cor = CORES["domingo"] if DIAS[i].weekday() == 6 else CORES["cinza"]
         for cel in (data, dia):
             cel.fill = preencher(cor)
             cel.font = Font(bold=True, size=9)
             cel.alignment = CENTRO
             cel.border = BORDA
-        obs = "Fechado" if i in FECHADO else ("Coletiva" if i in COLETIVA else None)
+        obs = "Fechado" if i in FECHADO else ("Folga geral" if i in COLETIVA else None)
         if obs:
             o = ws.cell(row=linha_obs, column=c, value=obs)
             o.font = Font(size=7, bold=True)
             o.alignment = Alignment(horizontal="center", shrink_to_fit=True)
-            o.fill = preencher(CORES["X"] if i in FECHADO else CORES["F"])
-        ws.column_dimensions[get_column_letter(c)].width = 4.6
+            o.fill = preencher(CORES["H"] if i in FECHADO else CORES["F"])
+        ws.column_dimensions[L(c)].width = 4.6
 
     c_fim = col0 + len(dias) - 1
-    L = get_column_letter
     tot_cols = ["Folgas", "Dobras", "Dom. folga", "Dias trab."]
     for k, txt in enumerate(tot_cols):
         c = c_fim + 1 + k
@@ -126,29 +268,37 @@ def aba_calendario(wb, setor, mes, pessoas, totais):
         faixa = f"{L(col0)}{linha}:{L(c_fim)}{linha}"
         formulas = [
             f'=COUNTIF({faixa},"F")',
-            f'=COUNTIF({faixa},"B")',
+            f'=COUNTIF({faixa},"D")+COUNTIF({faixa},"DS")',
             f'=SUMPRODUCT(({faixa_dias}="Dom")*({faixa}="F"))',
-            f'=SUMPRODUCT(({faixa}="T")+({faixa}="B")+({faixa}="D")+({faixa}="M"))',
+            f'=COUNTA({faixa})-COUNTIF({faixa},"F")-COUNTIF({faixa},"H")',
         ]
         for k, f in enumerate(formulas):
             cel = ws.cell(row=linha, column=c_fim + 1 + k, value=f)
             cel.alignment = CENTRO
             cel.border = BORDA
-        totais[(setor, p.nome, mes)] = {
-            "folgas": f"'{ws.title}'!{L(c_fim + 1)}{linha}",
-            "dobras": f"'{ws.title}'!{L(c_fim + 2)}{linha}",
-            "domingos": f"'{ws.title}'!{L(c_fim + 3)}{linha}",
-            "trabalho": f"'{ws.title}'!{L(c_fim + 4)}{linha}",
-        }
+            cel.font = Font(bold=True)
         linhas_turno.setdefault(p.turno, []).append(linha)
         linha += 1
     primeira, ultima = linha_dia + 1, linha - 1
-    regras_de_cor(ws, f"{L(col0)}{primeira}:{L(c_fim)}{ultima}")
+    regras_de_cor(ws, f"{L(col0)}{primeira}:{L(c_fim)}{ultima}", f"{L(col0)}{primeira}")
 
-    # Linhas de cobertura
-    linha += 1
+    # Totais do mês
+    ws.cell(row=linha, column=1, value="Total do setor").font = Font(bold=True)
+    ws.merge_cells(start_row=linha, start_column=1, end_row=linha, end_column=4)
+    for k in range(4):
+        col = L(c_fim + 1 + k)
+        cel = ws.cell(row=linha, column=c_fim + 1 + k, value=f"=SUM({col}{primeira}:{col}{ultima})")
+        cel.font = Font(bold=True)
+        cel.alignment = CENTRO
+        cel.fill = preencher(CORES["cinza"])
+        cel.border = BORDA
+    linha += 2
 
-    def cobertura(rotulo, montar, minimo=None):
+    def trabalhando(col, a, b):
+        faixa = f"{col}{a}:{col}{b}"
+        return f'(COUNTA({faixa})-COUNTIF({faixa},"F")-COUNTIF({faixa},"H"))'
+
+    def cobertura(rotulo, montar, minimo=None, maximo=None):
         nonlocal linha
         cel = ws.cell(row=linha, column=1, value=rotulo)
         cel.font = Font(bold=True, size=9)
@@ -160,40 +310,38 @@ def aba_calendario(wb, setor, mes, pessoas, totais):
             c.font = Font(size=9, bold=True)
             c.fill = preencher("F2F2F2")
             c.border = BORDA
+        faixa = f"{L(col0)}{linha}:{L(c_fim)}{linha}"
+        topo = f"{L(col0)}${linha_obs}"
+        cond = None
         if minimo:
-            faixa = f"{L(col0)}{linha}:{L(c_fim)}{linha}"
-            topo = f"{L(col0)}${linha_obs}"
+            cond = f'AND({topo}="",{L(col0)}{linha}<{minimo})'
+        if maximo:
+            cond = f'AND({topo}="",{L(col0)}{linha}>{maximo})'
+        if cond:
             ws.conditional_formatting.add(
-                faixa,
-                FormulaRule(formula=[f'AND({topo}="",{L(col0)}{linha}<{minimo})'],
-                            fill=preencher(CORES["alerta"]), font=Font(color="9C0006", bold=True)),
-            )
+                faixa, FormulaRule(formula=[cond], fill=preencher(CORES["alerta"]),
+                                   font=Font(color="9C0006", bold=True)))
         linha += 1
 
-    todas = list(range(primeira, ultima + 1))
     if setor == "Cozinha":
         m, n = linhas_turno["manha"], linhas_turno["noite"]
         cobertura("Manhã (meta 7)",
-                  lambda col: f'=SUMPRODUCT(({col}{m[0]}:{col}{m[-1]}="T")+({col}{m[0]}:{col}{m[-1]}="B")+({col}{m[0]}:{col}{m[-1]}="D"))'
-                              f'+COUNTIF({col}{n[0]}:{col}{n[-1]},"B")', None)
+                  lambda col: f'={trabalhando(col, m[0], m[-1])}+COUNTIF({col}{n[0]}:{col}{n[-1]},"D")')
         cobertura("Noite (meta 6)",
-                  lambda col: f'=SUMPRODUCT(({col}{n[0]}:{col}{n[-1]}="T")+({col}{n[0]}:{col}{n[-1]}="B")+({col}{n[0]}:{col}{n[-1]}="D"))'
-                              f'+COUNTIF({col}{m[0]}:{col}{m[-1]},"B")', None)
+                  lambda col: f'={trabalhando(col, n[0], n[-1])}+COUNTIF({col}{m[0]}:{col}{m[-1]},"D")')
         cobertura("Manhã de folga (máx. 2)",
-                  lambda col: f'=COUNTIF({col}{m[0]}:{col}{m[-1]},"F")', None)
+                  lambda col: f'=COUNTIF({col}{m[0]}:{col}{m[-1]},"F")', maximo=2)
     elif setor == "Salão":
         s = linhas_turno["salao"]
-        cobertura("No salão, sem Juliana (mín. 5)",
-                  lambda col: f'=SUMPRODUCT(({col}{s[0]}:{col}{s[-1]}="T")+({col}{s[0]}:{col}{s[-1]}="D"))', 5)
+        cobertura("No salão às 11h30, sem Juliana (mín. 5)",
+                  lambda col: f'={trabalhando(col, s[0], s[-1])}', minimo=5)
     else:
-        cobertura("Trabalhando",
-                  lambda col: f'=SUMPRODUCT(({col}{todas[0]}:{col}{todas[-1]}<>"F")*({col}{todas[0]}:{col}{todas[-1]}<>"X"))',
-                  1)
+        cobertura("Trabalhando", lambda col: f'={trabalhando(col, primeira, ultima)}', minimo=1)
 
     ws.column_dimensions["A"].width = 14
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 8
+    ws.column_dimensions["D"].width = 9
     ws.freeze_panes = ws.cell(row=linha_dia + 1, column=col0)
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
@@ -203,160 +351,13 @@ def aba_calendario(wb, setor, mes, pessoas, totais):
     ws.print_title_rows = f"{linha_data}:{linha_dia}"
 
 
-def aba_legenda(wb, setores):
-    ws = wb.active
-    ws.title = "Legenda e regras"
-    ws["A1"] = "Escala de trabalho 5×2 — Dezembro/2026 e Janeiro/2027"
-    ws["A1"].font = Font(bold=True, size=16, color=CORES["titulo"])
-    ws["A2"] = "Restaurante Kazu · planejamento por setor · período de 30/11/2026 a 31/01/2027"
-    ws["A2"].font = Font(italic=True, color="595959")
-    r = 4
-    ws.cell(row=r, column=1, value="Legenda").font = Font(bold=True, size=12)
-    r += 1
-    for cod, txt in LEGENDA:
-        c = ws.cell(row=r, column=1, value=cod)
-        c.alignment = CENTRO
-        c.font = Font(bold=True)
-        c.fill = preencher(CORES[cod])
-        c.border = BORDA
-        ws.cell(row=r, column=2, value=txt)
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value="Datas especiais").font = Font(bold=True, size=12)
-    r += 1
-    for data, txt in DATAS_ESPECIAIS:
-        c = ws.cell(row=r, column=1, value=data)
-        c.number_format = "dd/mm/yyyy"
-        ws.cell(row=r, column=2, value=f"{NOMES_DIA[data.weekday()]} — {txt}")
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value="Regras gerais").font = Font(bold=True, size=12)
-    r += 1
-    regras = [
-        "Regime 5×2: duas folgas por semana (segunda a domingo).",
-        "No máximo cinco dias seguidos de trabalho.",
-        "Evitar duas folgas seguidas, exceto no fim de ano.",
-        "Homens: um domingo de folga por mês. Mulheres: dois, de preferência quinzenais.",
-        "Bar e Sushi: quando um folga, o outro faz dobra.",
-        "Salão: mínimo de 5 no turno das 11h30 (Juliana conta só na manhã); prioridade sexta a domingo.",
-        "Cozinha: meta de 7 na manhã e 6 na noite; as folgas são cobertas com dobras.",
-        "Pia: Daniel cobre as folgas de Ilma (código M) e de Claudia (código T, turno da noite).",
-        "Refeitório: Joelma não folga junto com Rafael da cozinha e evita sábados.",
-        f"Domingo: turno único, {DOMINGO}, sem dobra.",
-    ]
-    for txt in regras:
-        ws.cell(row=r, column=1, value="•").alignment = CENTRO
-        ws.cell(row=r, column=2, value=txt)
-        r += 1
-    r += 1
-    ws.cell(row=r, column=1, value="Equipe").font = Font(bold=True, size=12)
-    r += 1
-    for c, txt in enumerate(["Setor", "Colaborador", "Turno", "Horário", "Intervalo", "Restrição / observação"], 1):
-        cel = ws.cell(row=r, column=c, value=txt)
-        cel.font = Font(bold=True)
-        cel.fill = preencher(CORES["cinza"])
-        cel.border = BORDA
-    r += 1
-    for setor, pessoas in setores:
-        for p in pessoas:
-            for c, txt in enumerate([setor, p.nome, turno_legivel(p), p.horario, p.intervalo, p.observacao], 1):
-                ws.cell(row=r, column=c, value=txt).border = BORDA
-            r += 1
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 13
-    ws.column_dimensions["E"].width = 10
-    ws.column_dimensions["F"].width = 55
-
-
-def aba_resumo(wb, setores, totais):
-    ws = wb.create_sheet("Resumo", 1)
-    ws["A1"] = "Resumo individual de folgas, dobras e domingos"
-    ws["A1"].font = Font(bold=True, size=14, color=CORES["titulo"])
-    ws["A2"] = "Os números vêm das abas de cada setor por fórmula: se mudar um código no calendário, o resumo acompanha."
-    ws["A2"].font = Font(italic=True, size=9, color="595959")
-    cab = ["Setor", "Colaborador", "Turno", "Folgas Dez", "Folgas Jan", "Dobras Dez", "Dobras Jan",
-           "Dom. folga Dez", "Dom. folga Jan", "Total folgas", "Total dobras", "Dias trabalhados"]
-    for c, txt in enumerate(cab, 1):
-        cel = ws.cell(row=4, column=c, value=txt)
-        cel.font = Font(bold=True)
-        cel.fill = preencher(CORES["cinza"])
-        cel.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cel.border = BORDA
-    r = 5
-    for setor, pessoas in setores:
-        for p in pessoas:
-            dz, jn = totais[(setor, p.nome, "Dez")], totais[(setor, p.nome, "Jan")]
-            vals = [setor, p.nome, turno_legivel(p),
-                    f"={dz['folgas']}", f"={jn['folgas']}", f"={dz['dobras']}", f"={jn['dobras']}",
-                    f"={dz['domingos']}", f"={jn['domingos']}",
-                    f"=D{r}+E{r}", f"=F{r}+G{r}", f"={dz['trabalho']}+{jn['trabalho']}"]
-            for c, v in enumerate(vals, 1):
-                cel = ws.cell(row=r, column=c, value=v)
-                cel.border = BORDA
-                if c > 3:
-                    cel.alignment = CENTRO
-            for c in (6, 7, 11):
-                ws.cell(row=r, column=c).fill = preencher("FFF2E0")
-            r += 1
-    ws.cell(row=r, column=2, value="Total").font = Font(bold=True)
-    for c in range(4, 13):
-        col = get_column_letter(c)
-        cel = ws.cell(row=r, column=c, value=f"=SUM({col}5:{col}{r - 1})")
-        cel.font = Font(bold=True)
-        cel.alignment = CENTRO
-        cel.border = BORDA
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 11
-    for c in range(4, 13):
-        ws.column_dimensions[get_column_letter(c)].width = 10.5
-    ws.row_dimensions[4].height = 32
-    ws.freeze_panes = "D5"
-
-
-def aba_conferencia(wb, ocorrencias):
-    ws = wb.create_sheet("Conferência", 2)
-    ws["A1"] = "Conferência das regras"
-    ws["A1"].font = Font(bold=True, size=14, color=CORES["titulo"])
-    ws["A2"] = ("Exceção = regra obrigatória não atendida · Atenção = preferência não atendida · "
-                "Aceita = situação prevista pelas próprias regras")
-    ws["A2"].font = Font(italic=True, size=9, color="595959")
-    n = len(ocorrencias)
-    ultima = 8 + n
-    for k, tipo in enumerate(("Exceção", "Atenção", "Aceita")):
-        ws.cell(row=3 + k, column=1, value=tipo).font = Font(bold=True)
-        ws.cell(row=3 + k, column=2, value=f'=COUNTIF(A9:A{ultima},"{tipo}")').font = Font(bold=True)
-    cores_tipo = {"Exceção": "FFC7CE", "Atenção": "FFEB9C", "Aceita": "E2EFDA"}
-    cab = ["Tipo", "Setor", "Colaborador", "Data", "Regra", "Detalhe"]
-    for c, txt in enumerate(cab, 1):
-        cel = ws.cell(row=8, column=c, value=txt)
-        cel.font = Font(bold=True)
-        cel.fill = preencher(CORES["cinza"])
-        cel.border = BORDA
-    ordem = {"Exceção": 0, "Atenção": 1, "Aceita": 2}
-    r = 9
-    for o in sorted(ocorrencias, key=lambda o: ordem[o["tipo"]]):
-        for c, k in enumerate(("tipo", "setor", "pessoa", "data", "regra", "detalhe"), 1):
-            cel = ws.cell(row=r, column=c, value=o[k])
-            cel.border = BORDA
-        ws.cell(row=r, column=1).fill = preencher(cores_tipo[o["tipo"]])
-        r += 1
-    for col, w in zip("ABCDEF", (10, 14, 18, 8, 38, 70)):
-        ws.column_dimensions[col].width = w
-    ws.freeze_panes = "A9"
-    ws.auto_filter.ref = f"A8:F{max(r - 1, 8)}"
-
-
 def gerar_excel(caminho, escala, setores, ocorrencias):
+    """escala já com os códigos impressos (apresentacao.traduzir)."""
     wb = Workbook()
-    aba_legenda(wb, setores)
-    totais = {}
+    aba_regras(wb, setores)
     for setor, _ in setores:
         for mes in ("Dez", "Jan"):
-            aba_calendario(wb, setor, mes, escala[setor], totais)
-    aba_resumo(wb, setores, totais)
-    aba_conferencia(wb, ocorrencias)
+            aba_calendario(wb, setor, mes, escala[setor])
+    n_pend = aba_pendencias(wb, ocorrencias)
     wb.save(caminho)
-    return len(wb.sheetnames)
+    return len(wb.sheetnames), n_pend

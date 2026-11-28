@@ -8,21 +8,26 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from exportar_excel import CORES, LEGENDA, MESES, turno_legivel
-from modelo import COLETIVA, DATAS_ESPECIAIS, DIAS, DOMINGO, FECHADO, NOMES_DIA
+from apresentacao import (
+    CORES, LEGENDA, MESES, PADRONIZACAO, PONTOS_DE_ATENCAO, REGRAS_GERAIS, SETORES_RESUMO,
+    turno_legivel,
+)
+from modelo import COLETIVA, DATAS_ESPECIAIS, DIAS, FECHADO, NOMES_DIA
+
+NOMES_DIA_LONGO = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 REGRAS_SETOR = {
     "Bar": [
         "Vinicius folga às segundas-feiras até 20/12/2026.",
-        "Quando um folga, o outro faz a dobra (11:45–23:00, 2h de intervalo).",
+        "Quando um folga, o outro faz a dobra (D, 11:45–23:00); no domingo, a cobertura é DS.",
         "Cobertura diária garantida, sem folgas simultâneas (exceto datas coletivas).",
     ],
     "Sushi": [
-        "Quando um folga, o outro faz a dobra (11:45–23:00, 2h de intervalo).",
+        "Quando um folga, o outro faz a dobra (D, 11:45–23:00); no domingo, a cobertura é DS.",
         "Folgas e dobras distribuídas de forma equilibrada.",
     ],
     "Salão": [
-        "Mínimo de 5 no turno das 11h30 (Juliana conta só na manhã); prioridade sexta a domingo.",
+        "Mínimo de 5 no turno integral (I, 11h30); Juliana faz só a manhã (M). Prioridade sexta a domingo.",
         "Elaine e Marcos não folgam juntos; Adriano e Guilherme não folgam juntos.",
         "Marcos trabalha em 13/12, folga em 26/12 e evita folgas às segundas e terças.",
         "Sivanilda folga em 19/12. Juliana, Elaine e Sivanilda: dois domingos por mês.",
@@ -34,7 +39,7 @@ REGRAS_SETOR = {
         "No máximo 2 da manhã de folga no mesmo dia. Edna folga sábado e domingo; Moura, segunda e terça.",
     ],
     "Pia": [
-        "Daniel cobre as folgas de Ilma (código M, turno da manhã) e de Claudia (turno da noite).",
+        "Daniel cobre as folgas de Ilma (M, turno da manhã) e de Claudia (N, turno da noite); no domingo, DS.",
         "Sem folgas simultâneas nos dias de semana. Ilma e Claudia: dois domingos por mês; Daniel: um.",
     ],
     "Refeitório": [
@@ -103,14 +108,20 @@ def quebra(doc):
 
 def calendario(doc, setor, mes, pessoas):
     rotulo, dias = MESES[mes]
-    titulo(doc, f"{setor} — {rotulo}", 2)
+    titulo(doc, f"{setor} — {rotulo}", 1)
+    for txt in REGRAS_SETOR[setor]:
+        par = doc.add_paragraph(txt, style="List Bullet")
+        par.paragraph_format.space_after = Pt(0)
+        for r in par.runs:
+            r.font.size = Pt(8)
+    doc.add_paragraph().paragraph_format.space_after = Pt(0)
     ncol = 2 + len(dias) + 3
-    tab = doc.add_table(rows=2 + len(pessoas), cols=ncol)
+    tab = doc.add_table(rows=2 + len(pessoas) + 1, cols=ncol)
     tab.style = "Table Grid"
     tab.alignment = WD_TABLE_ALIGNMENT.CENTER
     tab.autofit = False
     margens_celula(tab)
-    larguras = [Cm(2.1), Cm(1.4)] + [Cm(0.62)] * len(dias) + [Cm(0.8)] * 3
+    larguras = [Cm(2.0), Cm(1.4)] + [Cm(0.66)] * len(dias) + [Cm(0.85)] * 3
     fixar_larguras(tab, larguras)
 
     cab0, cab1 = tab.rows[0].cells, tab.rows[1].cells
@@ -120,18 +131,14 @@ def calendario(doc, setor, mes, pessoas):
     escrever(cab1[1], "", 7)
     for k, i in enumerate(dias):
         c = 2 + k
-        cor = CORES["D"] if DIAS[i].weekday() == 6 else CORES["cinza"]
-        if i in FECHADO:
-            cor = CORES["X"]
-        elif i in COLETIVA:
-            cor = CORES["F"]
+        cor = CORES["domingo"] if DIAS[i].weekday() == 6 else CORES["cinza"]
         escrever(cab0[c], DIAS[i].strftime("%d"), 7, True)
-        escrever(cab1[c], NOMES_DIA[DIAS[i].weekday()][:2], 6, True)
+        escrever(cab1[c], NOMES_DIA[DIAS[i].weekday()][:3], 5.5, True)
         sombrear(cab0[c], cor)
         sombrear(cab1[c], cor)
-    for k, txt in enumerate(("F", "B", "Dom")):
+    for k, txt in enumerate(("Folgas", "Dobras", "Dom. folga")):
         c = 2 + len(dias) + k
-        escrever(cab0[c], txt, 7, True)
+        escrever(cab0[c], txt, 5.5, True)
         escrever(cab1[c], "", 6)
         sombrear(cab0[c], CORES["cinza"])
         sombrear(cab1[c], CORES["cinza"])
@@ -139,24 +146,34 @@ def calendario(doc, setor, mes, pessoas):
         sombrear(cab0[c], CORES["cinza"])
         sombrear(cab1[c], CORES["cinza"])
 
+    soma = [0, 0, 0]
     for r, (p, cod) in enumerate(pessoas.items(), start=2):
         cel = tab.rows[r].cells
         escrever(cel[0], p.nome, 7, True, centro=False)
         escrever(cel[1], turno_legivel(p), 6, centro=False)
         for k, i in enumerate(dias):
             x = cod[i]
-            escrever(cel[2 + k], x, 7, x in ("F", "B"))
-            if x != "T":
+            escrever(cel[2 + k], x, 6.5 if len(x) > 1 else 7, x in ("F", "D", "DS"))
+            if x in CORES:
                 sombrear(cel[2 + k], CORES[x])
         folgas = sum(1 for i in dias if cod[i] == "F")
-        dobras = sum(1 for i in dias if cod[i] == "B")
+        dobras = sum(1 for i in dias if cod[i] in ("D", "DS"))
         doms = sum(1 for i in dias if cod[i] == "F" and DIAS[i].weekday() == 6)
         for k, v in enumerate((folgas, dobras, doms)):
+            soma[k] += v
             escrever(cel[2 + len(dias) + k], v, 7, True)
+    ult = tab.rows[-1].cells
+    juntar = ult[0].merge(ult[1 + len(dias)])
+    escrever(juntar, "Total do setor no mês", 7, True, centro=False)
+    sombrear(juntar, CORES["cinza"])
+    for k, v in enumerate(soma):
+        escrever(ult[2 + len(dias) + k], v, 7, True)
+        sombrear(ult[2 + len(dias) + k], CORES["cinza"])
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(4)
-    run = p.add_run("T trabalho · F folga · X fechado · B dobra 11:45–23:00 · D domingo 10:30–19:54 · "
-                    "M Daniel na manhã · colunas finais: folgas, dobras e domingos de folga no mês")
+    run = p.add_run("M manhã 08:00–17:24 · N noite 13:30–22:48 · I integral 11:30–21:54 · "
+                    "S domingo 10:30–19:54 · D dobra 11:45–23:00 · DS cobertura domingo 10:30–19:54 · "
+                    "F folga · H restaurante fechado")
     run.font.size = Pt(7)
     run.italic = True
 
@@ -175,7 +192,97 @@ def tabela_simples(doc, cabecalho, linhas, larguras, tamanho=8):
     return tab
 
 
+def sem_bordas(tabela):
+    tblPr = tabela._tbl.tblPr
+    bordas = OxmlElement("w:tblBorders")
+    for lado in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{lado}")
+        el.set(qn("w:val"), "nil")
+        bordas.append(el)
+    tblPr.append(bordas)
+
+
+def subtitulo(celula, texto):
+    par = celula.add_paragraph()
+    par.paragraph_format.space_before = Pt(6)
+    par.paragraph_format.space_after = Pt(2)
+    run = par.add_run(texto)
+    run.bold = True
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor.from_string(CORES["titulo"])
+
+
+def item(celula, texto, tamanho=8):
+    par = celula.add_paragraph(style="List Bullet")
+    par.paragraph_format.space_after = Pt(0)
+    run = par.add_run(texto)
+    run.font.size = Pt(tamanho)
+
+
+def mini_tabela(celula, cabecalho, linhas, larguras, cores=None, tamanho=7.5):
+    tab = celula.add_table(rows=1 + len(linhas), cols=len(cabecalho))
+    tab.style = "Table Grid"
+    tab.autofit = False
+    for c, txt in enumerate(cabecalho):
+        escrever(tab.rows[0].cells[c], txt, tamanho, True, centro=False)
+        sombrear(tab.rows[0].cells[c], CORES["cinza"])
+    for r, linha in enumerate(linhas, start=1):
+        for c, txt in enumerate(linha):
+            escrever(tab.rows[r].cells[c], txt, tamanho, c == 0, centro=False)
+        if cores and cores[r - 1]:
+            sombrear(tab.rows[r].cells[0], cores[r - 1])
+    fixar_larguras(tab, [Cm(w) for w in larguras])
+    return tab
+
+
+def pagina_regras(doc):
+    titulo(doc, "Escala de trabalho 5x2 — Dezembro/2026 e Janeiro/2027", 0)
+    p = doc.add_paragraph("A escala está organizada por setor, com controle individual de horários, folgas "
+                          "semanais, folgas dominicais, dobras e quantidade de colaboradores disponíveis "
+                          "para cada turno. Período: 30/11/2026 a 31/01/2027 · 29 colaboradores.")
+    p.runs[0].font.size = Pt(9)
+    grade = doc.add_table(rows=1, cols=2)
+    grade.autofit = False
+    sem_bordas(grade)
+    fixar_larguras(grade, [Cm(14.2), Cm(13.4)])
+    esq, dir_ = grade.rows[0].cells
+    esq.paragraphs[0].paragraph_format.space_after = Pt(0)
+    dir_.paragraphs[0].paragraph_format.space_after = Pt(0)
+
+    subtitulo(esq, "1. Regras gerais da escala")
+    for txt in REGRAS_GERAIS:
+        item(esq, txt)
+    subtitulo(esq, "Datas especiais")
+    cores = []
+    for _, t in DATAS_ESPECIAIS:
+        cores.append(CORES["H"] if "fechado" in t else (CORES["F"] if "Folga" in t else CORES["domingo"]))
+    mini_tabela(esq, ["Data", "Dia da semana", "Consideração"],
+                [(x.strftime("%d/%m/%Y"), NOMES_DIA_LONGO[x.weekday()], t) for x, t in DATAS_ESPECIAIS],
+                [2.2, 2.4, 9.0], cores)
+    subtitulo(esq, "5. Pontos de atenção antes da aprovação")
+    for txt in PONTOS_DE_ATENCAO:
+        item(esq, txt, 7.5)
+
+    subtitulo(dir_, "4. Legenda dos horários")
+    mini_tabela(dir_, ["Código", "Descrição", "Horário", "Intervalo"],
+                [(c, d, h, i) for c, d, h, i in LEGENDA], [1.5, 3.8, 3.0, 2.2],
+                [CORES.get(c) for c, *_ in LEGENDA])
+    subtitulo(dir_, "3. Organização dos setores")
+    linhas = [(s, str(n)) for s, n in SETORES_RESUMO] + [("Total", str(sum(n for _, n in SETORES_RESUMO)))]
+    mini_tabela(dir_, ["Setor", "Colaboradores"], linhas, [4.5, 3.0])
+    subtitulo(dir_, "Padronização visual")
+    mini_tabela(dir_, ["Cor", "Uso"], [(cor, uso) for _, cor, uso in PADRONIZACAO], [2.5, 6.0],
+                [CORES[k] for k, *_ in PADRONIZACAO])
+    nota = dir_.add_paragraph()
+    nota.paragraph_format.space_before = Pt(4)
+    r = nota.add_run("Ao final de cada calendário mensal estão os totais individuais de folgas e dobras. "
+                     "As pendências da proposta estão na aba Pendências do Excel.")
+    r.font.size = Pt(7.5)
+    r.italic = True
+
+
 def gerar_word(caminho, escala, setores, ocorrencias):
+    """escala já com os códigos impressos (apresentacao.traduzir)."""
     doc = Document()
     sec = doc.sections[0]
     sec.orientation = WD_ORIENT.LANDSCAPE
@@ -187,78 +294,9 @@ def gerar_word(caminho, escala, setores, ocorrencias):
     estilo.font.name = "Calibri"
     estilo.font.size = Pt(10)
 
-    # Página 1: apresentação
-    titulo(doc, "Escala de trabalho 5×2 — Dezembro/2026 e Janeiro/2027", 0)
-    doc.add_paragraph("Planejamento de escala de funcionários por setor — Restaurante Kazu · "
-                      "período de 30/11/2026 a 31/01/2027 · 29 colaboradores em 6 setores.")
-    titulo(doc, "Regras gerais", 2)
-    for txt in (
-        "Regime 5×2, com duas folgas por semana (semana de segunda a domingo).",
-        "No máximo cinco dias seguidos de trabalho; evitar duas folgas seguidas, exceto no fim de ano.",
-        "Homens: um domingo de folga por mês. Mulheres: dois, de preferência com intervalo quinzenal.",
-        "Folgas e dobras distribuídas de forma equilibrada, priorizando os horários de maior movimento.",
-        f"Domingo: turno único, das {DOMINGO.replace('–', ' às ')}, sem dobra.",
-    ):
-        doc.add_paragraph(txt, style="List Bullet")
-    titulo(doc, "Datas especiais", 2)
-    tabela_simples(doc, ["Data", "Dia", "Consideração"],
-                   [(x.strftime("%d/%m/%Y"), NOMES_DIA[x.weekday()], t) for x, t in DATAS_ESPECIAIS],
-                   [3, 2, 14])
-    titulo(doc, "Legenda", 2)
-    tab = doc.add_table(rows=len(LEGENDA), cols=2)
-    tab.style = "Table Grid"
-    tab.autofit = False
-    fixar_larguras(tab, [Cm(1.2), Cm(12)])
-    for r, (cod, txt) in enumerate(LEGENDA):
-        escrever(tab.rows[r].cells[0], cod, 9, True)
-        sombrear(tab.rows[r].cells[0], CORES[cod])
-        escrever(tab.rows[r].cells[1], txt, 9, centro=False)
-
-    # Uma página por setor e mês
-    for setor, pessoas in setores:
-        quebra(doc)
-        titulo(doc, f"Setor: {setor}", 1)
-        for txt in REGRAS_SETOR[setor]:
-            par = doc.add_paragraph(txt, style="List Bullet")
-            par.paragraph_format.space_after = Pt(0)
-            for r in par.runs:
-                r.font.size = Pt(9)
-        calendario(doc, setor, "Dez", escala[setor])
-        quebra(doc)
-        calendario(doc, setor, "Jan", escala[setor])
-
-    # Resumo
-    quebra(doc)
-    titulo(doc, "Resumo individual", 1)
-    linhas = []
-    for setor, pessoas in setores:
-        for p in pessoas:
-            cod = escala[setor][p]
-            dz, jn = MESES["Dez"][1], MESES["Jan"][1]
-            f = lambda dias, x: sum(1 for i in dias if cod[i] == x)
-            dom = lambda dias: sum(1 for i in dias if cod[i] == "F" and DIAS[i].weekday() == 6)
-            linhas.append((setor, p.nome, turno_legivel(p), f(dz, "F"), f(jn, "F"), f(dz, "B"), f(jn, "B"),
-                           dom(dz), dom(jn)))
-    tabela_simples(doc, ["Setor", "Colaborador", "Turno", "Folgas Dez", "Folgas Jan", "Dobras Dez",
-                         "Dobras Jan", "Dom. Dez", "Dom. Jan"], linhas,
-                   [2.6, 2.8, 2.2, 2, 2, 2, 2, 2, 2], 7)
-
-    # Pontos de atenção
-    quebra(doc)
-    titulo(doc, "Pontos que precisam de atenção", 1)
-    conta = {t: sum(1 for o in ocorrencias if o["tipo"] == t) for t in ("Exceção", "Atenção", "Aceita")}
-    doc.add_paragraph(
-        f"A proposta contempla os 29 colaboradores. A conferência automática encontrou "
-        f"{conta['Exceção']} exceção(ões) a regras obrigatórias, {conta['Atenção']} preferência(s) não "
-        f"atendida(s) e {conta['Aceita']} situação(ões) já previstas pelas próprias regras. "
-        "A lista completa, com filtro, está na aba Conferência do Excel.")
-    for tipo in ("Exceção", "Atenção", "Aceita"):
-        itens = [o for o in ocorrencias if o["tipo"] == tipo]
-        if not itens:
-            continue
-        titulo(doc, {"Exceção": "Exceções (regras obrigatórias)", "Atenção": "Preferências não atendidas",
-                     "Aceita": "Situações aceitas pelas regras"}[tipo], 2)
-        tabela_simples(doc, ["Setor", "Colaborador", "Data", "Regra", "Detalhe"],
-                       [(o["setor"], o["pessoa"], o["data"], o["regra"], o["detalhe"]) for o in itens],
-                       [2.8, 3.2, 1.6, 6.5, 13.5], 7)
+    pagina_regras(doc)
+    for setor, _ in setores:
+        for mes in ("Dez", "Jan"):
+            quebra(doc)
+            calendario(doc, setor, mes, escala[setor])
     doc.save(caminho)

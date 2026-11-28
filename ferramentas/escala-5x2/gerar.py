@@ -16,6 +16,7 @@ import sys
 AQUI = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, AQUI)
 
+from apresentacao import traduzir  # noqa: E402
 from conferencia import conferir  # noqa: E402
 from exportar_excel import gerar_excel  # noqa: E402
 from exportar_word import gerar_word  # noqa: E402
@@ -59,9 +60,10 @@ def main():
     setores = [(s, list(escala[s].keys())) for s, _ in SETORES]
     xlsx = os.path.join(PASTA, NOME + ".xlsx")
     docx = os.path.join(PASTA, NOME + ".docx")
-    abas = gerar_excel(xlsx, escala, setores, ocorrencias)
-    gerar_word(docx, escala, setores, ocorrencias)
-    print(f"Excel: {abas} abas · Word gerado")
+    impressa = traduzir(escala)
+    abas, pendencias = gerar_excel(xlsx, impressa, setores, ocorrencias)
+    gerar_word(docx, impressa, setores, ocorrencias)
+    print(f"Excel: {abas} abas, {pendencias} pendências · Word gerado")
 
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:

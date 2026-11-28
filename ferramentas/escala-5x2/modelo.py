@@ -30,12 +30,12 @@ JANELA_FIM_DE_ANO = set(range(INDICE[d(31, 12)], INDICE[d(3, 1)] + 1))  # folgas
 DOMINGO_3_JAN = INDICE[d(3, 1)]
 
 DATAS_ESPECIAIS = [
-    (d(30, 11), "Folga antecipada da primeira semana (toda a equipe)"),
+    (d(30, 11), "Folga geral, contabilizada na semana"),
     (d(25, 12), "Restaurante fechado, sem descontar folga"),
-    (d(31, 12), "Folga semanal (toda a equipe)"),
+    (d(31, 12), "Folga geral contabilizada"),
     (d(1, 1), "Restaurante fechado, sem descontar folga"),
-    (d(2, 1), "Folga semanal (toda a equipe)"),
-    (d(3, 1), "Conta como domingo de folga de janeiro para quem folgar"),
+    (d(2, 1), "Folga geral contabilizada"),
+    (d(3, 1), "Considerar na apuração dos domingos de janeiro"),
 ]
 
 
