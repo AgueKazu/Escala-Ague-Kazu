@@ -1,348 +1,328 @@
-"""Monta as folgas e as dobras de cada setor.
+"""Monta as folgas e as dobras de cada setor com o OR-Tools (CP-SAT).
 
-Método: busca local (recozimento simulado). Para cada pessoa e cada semana
-existe uma lista de combinações de folga possíveis (já respeitando as regras
-fixas: domingos fixos, dias em que a pessoa não trabalha, folgas coletivas).
-O programa troca combinações ao acaso e fica com as que diminuem a
-"pontuação de problemas". Regras obrigatórias valem muitos pontos;
-preferências valem poucos.
+Regras obrigatórias viram restrições (o programa não aceita violá-las).
+Preferências e metas viram "pontos de problema": o otimizador procura a escala
+com a menor soma de pontos. Os pesos seguem a ordem de prioridade do pedido:
+descanso legal > datas coletivas > 5 dias seguidos > folgas obrigatórias >
+duas folgas por semana > domingos > mínimo por turno > folgas simultâneas >
+equilíbrio das dobras > folgas seguidas > preferências.
+
+Códigos devolvidos por dia: T (horário normal), M (Daniel na manhã),
+B (dobra), D (domingo), F (folga), X (fechado).
 """
 
-import math
-import random
-from itertools import combinations
+from ortools.sat.python import cp_model
 
 from modelo import (
-    COLETIVA, DIAS, DOMINGO_3_JAN, DOMINGOS_POR_MES, FECHADO, JANELA_FIM_DE_ANO,
-    META_COZINHA, MINIMO_SALAO, SEMANA_FIM_DE_ANO, SEMANAS, dia_aberto, eh_domingo,
+    BAR, COLETIVA, COZINHA, DIAS, DOBRAS_POR_SEMANA, DOMINGO_EXTRA, FECHADO, INDICE,
+    META_COZINHA, MINIMO_SALAO, PARES_QUINZENAIS, PIA, REFEITORIO, SALAO_EQUIPE,
+    SEMANA_FINAL, SEMANAS, SUSHI, TODOS_DOMINGOS, d, dia_aberto, eh_domingo,
 )
 
 N = len(DIAS)
 
-# Pesos da pontuação
-GRAVE = 1000
-DOMINGO_ERRADO = 500
-COBERTURA = 300
-DOBRA_FALTANDO = 300
+# Pesos (pontos de problema)
+DOMINGO_FALTANDO = 3000
+EXCESSO_FOLGA_MANHA = 1000
+JUNTOS_PROIBIDO = 1000
+JUNTOS_EVITAR = 800
+DEFICIT_COZINHA = 300
+DEFICIT_SALAO_FIM = 250
+DEFICIT_SALAO_SEMANA = 70
+DOMINGO_COMPLEMENTAR = 150
+EVITAR_DATA = 200
+FOLGA_SEGUIDA = 40
+EVITAR_DIA_SEMANA = 30
 
 
-# ---------------------------------------------------------------------------
-# Combinações de folga por semana
-# ---------------------------------------------------------------------------
-def forcadas_da_semana(p, semana):
-    f = {i for i in semana if i in COLETIVA}
-    f |= {i for i in semana if i in p.folgas_fixas}
-    f |= {i for i in semana if DIAS[i].weekday() in p.dias_sem_trabalho and i not in FECHADO}
-    f |= {i for i in semana if i in p.domingos_fixos}
-    return f
+class Modelo:
+    def __init__(self):
+        self.m = cp_model.CpModel()
+        self.custos = []  # (peso, expressão)
+        self.f = {}  # (pessoa, dia) -> folga
+        self.b = {}  # (pessoa, dia) -> dobra
 
+    def bool(self):
+        return self.m.NewBoolVar("")
 
-def opcoes_da_semana(p, semana):
-    forcadas = forcadas_da_semana(p, semana)
-    livres = [
-        i for i in semana
-        if i not in FECHADO and i not in forcadas and i not in p.trabalho_fixo
-        and not (eh_domingo(i) and p.domingos_fixos)
-    ]
-    if semana == SEMANA_FIM_DE_ANO:
-        opcoes = [frozenset(forcadas)]
-        if DOMINGO_3_JAN in livres:
-            opcoes.append(frozenset(forcadas | {DOMINGO_3_JAN}))
-        return opcoes
-    k = max(0, 2 - len(forcadas))
-    return [frozenset(forcadas | set(c)) for c in combinations(livres, k)]
+    def custo(self, peso, expr):
+        self.custos.append((peso, expr))
 
+    def excesso(self, expr, limite, peso):
+        """Penaliza o quanto expr passa de limite."""
+        v = self.m.NewIntVar(0, 50, "")
+        self.m.Add(v >= expr - limite)
+        self.custo(peso, v)
+        return v
 
-def todas_forcadas(p):
-    f = set()
-    for s in SEMANAS:
-        f |= forcadas_da_semana(p, s)
-    return f
-
-
-# ---------------------------------------------------------------------------
-# Pontuação individual (depende só da pessoa)
-# ---------------------------------------------------------------------------
-def custo_pessoa(p, st, extra=None, forcadas=frozenset()):
-    c = 0
-    seguidos = 0
-    for i in range(N):
-        if st[i] == "W":
-            seguidos += 1
-            if seguidos > 5:
-                c += GRAVE
-        else:
-            seguidos = 0
-    for i in range(1, N):
-        if st[i] == "F" and st[i - 1] == "F":
-            if i in JANELA_FIM_DE_ANO and i - 1 in JANELA_FIM_DE_ANO:
+    def juntos(self, a, b, peso, dias=None):
+        """Penaliza (ou proíbe, se peso=None) folga de a e b no mesmo dia aberto."""
+        for i in dias if dias is not None else range(N):
+            if not dia_aberto(i):
                 continue
-            if i in forcadas and i - 1 in forcadas:
-                continue
-            c += 40
-    if p.domingos_mes:
-        for idx in DOMINGOS_POR_MES.values():
-            folgas = [i for i in idx if st[i] == "F"]
-            c += DOMINGO_ERRADO * abs(len(folgas) - p.domingos_mes)
-            if p.domingos_mes == 2 and len(folgas) == 2 and folgas[1] - folgas[0] == 7:
-                c += 20  # preferir domingos quinzenais
-    if extra:
-        c += extra(p, st)
-    return c
-
-
-# ---------------------------------------------------------------------------
-# Pontuação diária de cada setor (depende de todos do setor naquele dia)
-# ---------------------------------------------------------------------------
-def custo_dia_dupla(pessoas, sts, i):
-    """Bar e Sushi: um cobre o outro com dobra; os dois não podem folgar juntos."""
-    if not dia_aberto(i):
-        return 0
-    return GRAVE if all(sts[p][i] == "F" for p in pessoas) else 0
-
-
-def custo_dia_salao(pessoas, sts, i):
-    if not dia_aberto(i):
-        return 0
-    c = 0
-    por_nome = {p.nome: p for p in pessoas}
-    no_salao = sum(1 for p in pessoas if p.turno == "salao" and sts[p][i] == "W")
-    falta = max(0, MINIMO_SALAO - no_salao)
-    peso = 200 if DIAS[i].weekday() >= 4 else 60  # sexta, sábado e domingo primeiro
-    c += falta * peso
-    for a, b in (("Elaine", "Marcos"), ("Adriano", "Guilherme")):
-        if sts[por_nome[a]][i] == "F" and sts[por_nome[b]][i] == "F":
-            c += GRAVE
-    return c
-
-
-def pode_dobrar_no_dia(p, i):
-    return p.pode_dobrar and DIAS[i].weekday() not in p.sem_dobra_semana
-
-
-def custo_dia_cozinha(pessoas, sts, i):
-    if not dia_aberto(i):
-        return 0
-    c = 0
-    manha = [p for p in pessoas if p.turno == "manha"]
-    noite = [p for p in pessoas if p.turno == "noite"]
-    folga_m = sum(1 for p in manha if sts[p][i] == "F")
-    folga_n = sum(1 for p in noite if sts[p][i] == "F")
-    if folga_m >= 3:
-        c += GRAVE * (folga_m - 2)
-    por_nome = {p.nome: p for p in pessoas}
-    trio = [por_nome[n] for n in ("Rafael", "Miro", "Chef")]
-    for a, b in combinations(trio, 2):
-        if sts[a][i] == "F" and sts[b][i] == "F":
-            c += 50
-    if eh_domingo(i):
-        c += 50 * max(0, folga_m + folga_n - 3)  # domingo é turno único, sem dobra
-        return c
-    cobre_manha = sum(1 for p in noite if sts[p][i] == "W" and pode_dobrar_no_dia(p, i))
-    cobre_noite = sum(1 for p in manha if sts[p][i] == "W" and pode_dobrar_no_dia(p, i))
-    c += DOBRA_FALTANDO * max(0, folga_m - cobre_manha)
-    c += DOBRA_FALTANDO * max(0, folga_n - cobre_noite)
-    c += 5 * (folga_m ** 2 + folga_n ** 2)  # espalhar as folgas ao longo da semana
-    return c
-
-
-def custo_dia_pia(pessoas, sts, i):
-    if not dia_aberto(i):
-        return 0
-    folgas = sum(1 for p in pessoas if sts[p][i] == "F")
-    if eh_domingo(i):
-        return GRAVE if folgas == 3 else 0  # domingo: turno único, basta um
-    return COBERTURA * max(0, folgas - 1)
-
-
-def custo_dia_nenhum(pessoas, sts, i):
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Regras individuais extras
-# ---------------------------------------------------------------------------
-def extra_marcos(p, st):
-    return sum(30 for i in range(N) if st[i] == "F" and dia_aberto(i) and DIAS[i].weekday() in (0, 1))
-
-
-def extra_miro(p, st):
-    c = 0
-    for mes in (12, 1):
-        segundas = sum(1 for i in range(N)
-                       if DIAS[i].month == mes and DIAS[i].weekday() == 0 and st[i] == "F" and dia_aberto(i))
-        c += 200 * abs(segundas - 2)
-    return c
-
-
-def extra_joelma(rafael_st):
-    def f(p, st):
-        c = 0
-        for i in range(N):
-            if st[i] != "F" or not dia_aberto(i):
-                continue
-            if rafael_st[i] == "F":
-                c += 200
-            if DIAS[i].weekday() == 5:
-                c += 30
-        return c
-    return f
-
-
-EXTRAS = {("Salão", "Marcos"): extra_marcos, ("Cozinha", "Miro"): extra_miro}
-
-
-# ---------------------------------------------------------------------------
-# Busca
-# ---------------------------------------------------------------------------
-def status_de(escolhas):
-    st = ["X" if i in FECHADO else "W" for i in range(N)]
-    for s in escolhas:
-        for i in s:
-            st[i] = "F"
-    return st
-
-
-def resolver_setor(pessoas, custo_dia, extras=None, iteracoes=120000, tentativas=4, semente=7):
-    extras = extras or {}
-    opcoes = {p: [opcoes_da_semana(p, s) for s in SEMANAS] for p in pessoas}
-    forcadas = {p: frozenset(todas_forcadas(p)) for p in pessoas}
-    variaveis = [(p, w) for p in pessoas for w in range(len(SEMANAS)) if len(opcoes[p][w]) > 1]
-    melhor_total, melhor = None, None
-
-    for t in range(tentativas):
-        rnd = random.Random(semente + t)
-        esc = {p: [rnd.choice(o) for o in opcoes[p]] for p in pessoas}
-        sts = {p: status_de(esc[p]) for p in pessoas}
-        cp = {p: custo_pessoa(p, sts[p], extras.get(p), forcadas[p]) for p in pessoas}
-        cd = [custo_dia(pessoas, sts, i) for i in range(N)]
-        total = sum(cp.values()) + sum(cd)
-        if not variaveis:
-            melhor_total, melhor = total, esc
-            break
-        temp_ini, temp_fim = 300.0, 0.5
-        for it in range(iteracoes):
-            temp = temp_ini * (temp_fim / temp_ini) ** (it / iteracoes)
-            p, w = rnd.choice(variaveis)
-            atual = esc[p][w]
-            nova = rnd.choice(opcoes[p][w])
-            if nova == atual:
-                continue
-            semana = SEMANAS[w]
-            antigo_st = sts[p][:]
-            for i in semana:
-                if i not in FECHADO:
-                    sts[p][i] = "W"
-            for i in nova:
-                sts[p][i] = "F"
-            novo_cp = custo_pessoa(p, sts[p], extras.get(p), forcadas[p])
-            novos_cd = {i: custo_dia(pessoas, sts, i) for i in semana}
-            delta = novo_cp - cp[p] + sum(novos_cd[i] - cd[i] for i in semana)
-            if delta <= 0 or rnd.random() < math.exp(-delta / temp):
-                esc[p][w] = nova
-                cp[p] = novo_cp
-                for i in semana:
-                    cd[i] = novos_cd[i]
-                total += delta
+            if peso is None:
+                self.m.Add(self.f[a, i] + self.f[b, i] <= 1)
             else:
-                sts[p] = antigo_st
-        if melhor_total is None or total < melhor_total:
-            melhor_total, melhor = total, {p: list(v) for p, v in esc.items()}
-    return {p: status_de(melhor[p]) for p in pessoas}, melhor_total
+                self.excesso(self.f[a, i] + self.f[b, i], 1, peso)
+
+    # -------------------------------------------------------------------
+    def pessoa(self, p):
+        m = self.m
+        forcadas = set(COLETIVA)
+        forcadas |= set(p.folgas_fixas) | set(p.domingos_fixos)
+        forcadas |= {i for i in range(N) if DIAS[i].weekday() in p.dias_sem_trabalho}
+        forcadas -= FECHADO
+        for i in range(N):
+            if i in FECHADO:
+                continue
+            self.f[p, i] = v = self.bool()
+            if i in forcadas:
+                m.Add(v == 1)
+        f = lambda i: self.f[p, i] if i not in FECHADO else 0  # noqa: E731
+
+        # Duas folgas por semana (ausências fixas podem passar de 2: Edna e Moura)
+        for s in SEMANAS:
+            fixas = [i for i in s if i in forcadas]
+            livres = [i for i in s if i not in forcadas and i not in FECHADO]
+            if s == SEMANA_FINAL:
+                for i in livres:  # 31/12 e 02/01 já são as duas folgas
+                    if i != DOMINGO_EXTRA:
+                        m.Add(self.f[p, i] == 0)
+                continue
+            if len(fixas) >= 2:
+                for i in livres:
+                    m.Add(self.f[p, i] == 0)
+            else:
+                m.Add(sum(f(i) for i in s) == 2)
+
+        # Máximo de 5 dias seguidos (fechado também quebra a sequência)
+        trabalha = [0 if i in FECHADO else 1 - self.f[p, i] for i in range(N)]
+        for i in range(N - 5):
+            m.Add(sum(trabalha[i:i + 6]) <= 5)
+
+        # Domingos de folga
+        q = p.domingos_de_folga
+        if q == 2:
+            z = [self.bool() for _ in PARES_QUINZENAIS]
+            m.AddExactlyOne(z)
+            for s in TODOS_DOMINGOS:
+                m.Add(self.f[p, s] == sum(zk for zk, par in zip(z, PARES_QUINZENAIS) if s in par))
+        elif q == 1:
+            total = sum(self.f[p, s] for s in TODOS_DOMINGOS)
+            m.Add(total <= 1)
+            falta = self.bool()
+            m.Add(total + falta >= 1)
+            self.custo(DOMINGO_FALTANDO, falta)
+        if q:
+            self.custo(DOMINGO_COMPLEMENTAR, self.f[p, DOMINGO_EXTRA])
+
+        # Preferências
+        for i in range(N - 1):
+            if i in FECHADO or i + 1 in FECHADO or (i in forcadas and i + 1 in forcadas):
+                continue
+            self.excesso(self.f[p, i] + self.f[p, i + 1], 1, FOLGA_SEGUIDA)
+        for i in p.evitar_folga:
+            self.custo(EVITAR_DATA, self.f[p, i])
+        for i in range(N):
+            if dia_aberto(i) and DIAS[i].weekday() in p.evitar_dias_semana:
+                self.custo(EVITAR_DIA_SEMANA, self.f[p, i])
+
+        # Dobras
+        for i in range(N):
+            if not dia_aberto(i) or eh_domingo(i):
+                continue
+            if p.pode_dobrar and DIAS[i].weekday() not in p.sem_dobra_semana:
+                self.b[p, i] = v = self.bool()
+                m.AddImplication(v, self.f[p, i].Not())
+
+        # Descanso de 11h entre jornadas: quem entra às 08:00 não pode ter feito dobra
+        # (saída 23:00) na véspera. Domingo começa 10:30, então sábado com dobra é permitido.
+        if p.turno == "manha":
+            for i in range(N - 1):
+                if (p, i) not in self.b or eh_domingo(i + 1) or not dia_aberto(i + 1):
+                    continue
+                prox = [self.f[p, i + 1]] + ([self.b[p, i + 1]] if (p, i + 1) in self.b else [])
+                m.AddBoolOr(prox).OnlyEnforceIf(self.b[p, i])
+
+    def dobra(self, p, i):
+        return self.b.get((p, i), 0)
+
+    def resolver(self, segundos=60):
+        self.m.Minimize(sum(peso * e for peso, e in self.custos))
+        s = cp_model.CpSolver()
+        s.parameters.max_time_in_seconds = segundos
+        s.parameters.num_workers = 1  # resultado sempre igual a cada execução
+        s.parameters.random_seed = 7
+        st = s.Solve(self.m)
+        if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            raise RuntimeError(f"Sem solução: {s.StatusName(st)}")
+        self.solver = s
+        return s.ObjectiveValue(), s.StatusName(st)
+
+    def valor(self, v):
+        return int(self.solver.Value(v)) if not isinstance(v, int) else v
+
+    def codigos(self, p, manha_daniel=None):
+        cod = []
+        for i in range(N):
+            if i in FECHADO:
+                cod.append("X")
+            elif self.valor(self.f[p, i]):
+                cod.append("F")
+            elif eh_domingo(i):
+                cod.append("D")
+            elif self.valor(self.dobra(p, i)):
+                cod.append("B")
+            elif manha_daniel and self.valor(manha_daniel.get(i, 0)):
+                cod.append("M")
+            else:
+                cod.append("T")
+        return cod
 
 
 # ---------------------------------------------------------------------------
-# Códigos finais (T, F, X, B, D, M)
+# Setores
 # ---------------------------------------------------------------------------
-def codigos_basicos(st):
-    cod = []
-    for i, s in enumerate(st):
-        if s == "X":
-            cod.append("X")
-        elif s == "F":
-            cod.append("F")
-        elif eh_domingo(i):
-            cod.append("D")
-        else:
-            cod.append("T")
-    return cod
-
-
-def codigos_dupla(pessoas, sts):
-    cods = {p: codigos_basicos(sts[p]) for p in pessoas}
+def dupla(pessoas):
+    """Bar e Sushi: os dois nunca folgam juntos; quem fica faz dobra (domingo é turno único)."""
+    M = Modelo()
+    for p in pessoas:
+        M.pessoa(p)
     a, b = pessoas
+    M.juntos(a, b, None)
     for i in range(N):
-        if eh_domingo(i) or not dia_aberto(i):
+        if not dia_aberto(i):
             continue
-        if sts[a][i] == "F" and sts[b][i] == "W":
-            cods[b][i] = "B"
-        elif sts[b][i] == "F" and sts[a][i] == "W":
-            cods[a][i] = "B"
-    return cods
+        if eh_domingo(i):
+            continue
+        M.m.Add(M.b[a, i] == M.f[b, i])
+        M.m.Add(M.b[b, i] == M.f[a, i])
+    pontos, status = M.resolver(30)
+    return {p: M.codigos(p) for p in pessoas}, pontos, status
 
 
-def codigos_pia(pessoas, sts):
+def salao(pessoas):
+    M = Modelo()
+    for p in pessoas:
+        M.pessoa(p)
+    por = {p.nome: p for p in pessoas}
+    M.juntos(por["Elaine"], por["Marcos"], None)
+    M.juntos(por["Adriano"], por["Guilherme"], None)
+    jantar = [p for p in pessoas if p.turno == "salao"]
+    for i in range(N):
+        if not dia_aberto(i):
+            continue
+        fim = DIAS[i].weekday() >= 4
+        peso = DEFICIT_SALAO_FIM if fim else DEFICIT_SALAO_SEMANA
+        no_jantar = sum(1 - M.f[p, i] for p in jantar)
+        no_almoco = no_jantar + 1 - M.f[por["Juliana"], i]
+        M.excesso(MINIMO_SALAO - no_jantar, 0, peso)
+        M.excesso(MINIMO_SALAO - no_almoco, 0, peso)
+        if fim:  # quadro mais cheio de sexta a domingo
+            M.custo(10, sum(M.f[p, i] for p in pessoas))
+    pontos, status = M.resolver(60)
+    return {p: M.codigos(p) for p in pessoas}, pontos, status
+
+
+def cozinha_e_refeitorio(cozinha, refeitorio):
+    M = Modelo()
+    for p in cozinha + refeitorio:
+        M.pessoa(p)
+    por = {p.nome: p for p in cozinha}
+    joelma = refeitorio[0]
+    manha = [p for p in cozinha if p.turno == "manha"]
+    noite = [p for p in cozinha if p.turno == "noite"]
+
+    # Folgas simultâneas
+    for a, b in (("Rafael", "Miro"), ("Rafael", "Chef"), ("Miro", "Chef")):
+        M.juntos(por[a], por[b], JUNTOS_EVITAR)
+    M.juntos(por["Rafael"], por["Felix"], JUNTOS_PROIBIDO)
+    M.juntos(por["Rafael"], joelma, JUNTOS_PROIBIDO)
+
+    # Miro: duas segundas de folga em dezembro (28/12 é semana de fim de ano, todos trabalham)
+    segundas = [INDICE[d(x, 12)] for x in (7, 14, 21)]
+    M.m.Add(sum(M.f[por["Miro"], i] for i in segundas) == 2)
+
+    # Joelma: folga de preferência em dia de menor movimento (seg a qua)
+    for i in range(N):
+        if dia_aberto(i) and DIAS[i].weekday() in (3, 4):
+            M.custo(10, M.f[joelma, i])
+
+    for i in range(N):
+        if not dia_aberto(i):
+            continue
+        folga_manha = sum(M.f[p, i] for p in manha)
+        M.excesso(folga_manha, 2, EXCESSO_FOLGA_MANHA)  # inclui Edna e Moura
+        na_manha = sum(1 - M.f[p, i] for p in manha) + sum(M.dobra(p, i) for p in noite)
+        na_noite = sum(1 - M.f[p, i] for p in noite) + sum(M.dobra(p, i) for p in manha)
+        peso = DEFICIT_COZINHA  # domingo também conta: é dia de movimento (sem dobra, turno único)
+        for meta, presentes in ((META_COZINHA["manha"], na_manha), (META_COZINHA["noite"], na_noite)):
+            M.excesso(meta - presentes, 0, peso)
+            M.excesso(meta - presentes, 2, 2 * peso)  # falta de 3 ou mais pesa o triplo
+
+    # Dobras: teto semanal, prioridade para Rafael, Miro e Chef, equilíbrio entre os demais
+    total = {}
+    for p in cozinha:
+        if not p.pode_dobrar:
+            continue
+        teto = DOBRAS_POR_SEMANA["prioridade" if p.prioridade_dobra else "normal"]
+        for s in SEMANAS:
+            M.m.Add(sum(M.dobra(p, i) for i in s) <= teto)
+        total[p] = sum(M.dobra(p, i) for i in range(N))
+        M.custo(6 if p.prioridade_dobra else 10, total[p])
+    normais = [p for p in total if not p.prioridade_dobra]
+    maior, menor = M.m.NewIntVar(0, 40, ""), M.m.NewIntVar(0, 40, "")
+    for p in normais:
+        M.m.Add(maior >= total[p])
+        M.m.Add(menor <= total[p])
+    M.custo(25, maior - menor)
+    for p in total:
+        if p.prioridade_dobra:
+            M.excesso(maior + 1 - total[p], 0, 40)
+
+    pontos, status = M.resolver(120)
+    return ({p: M.codigos(p) for p in cozinha}, {joelma: M.codigos(joelma)}), pontos, status
+
+
+def pia(pessoas):
+    M = Modelo()
+    for p in pessoas:
+        M.pessoa(p)
     ilma, claudia, daniel = pessoas
-    cods = {p: codigos_basicos(sts[p]) for p in pessoas}
+    M.juntos(daniel, ilma, None)
+    M.juntos(daniel, claudia, None)
+    M.juntos(ilma, claudia, JUNTOS_EVITAR)
+    manha = {}
     for i in range(N):
-        if eh_domingo(i) or not dia_aberto(i) or sts[daniel][i] != "W":
+        if not dia_aberto(i) or eh_domingo(i):
             continue
-        fi, fc = sts[ilma][i] == "F", sts[claudia][i] == "F"
-        if fi and fc:
-            cods[daniel][i] = "B"
-        elif fi:
-            cods[daniel][i] = "M"
-    return cods
-
-
-def codigos_cozinha(pessoas, sts):
-    """Distribui as dobras de forma proporcional ao peso de cada um."""
-    cods = {p: codigos_basicos(sts[p]) for p in pessoas}
-    manha = [p for p in pessoas if p.turno == "manha"]
-    noite = [p for p in pessoas if p.turno == "noite"]
-    dobras = {p: 0 for p in pessoas}
-    for i in range(N):
-        if eh_domingo(i) or not dia_aberto(i):
+        fi, fc = M.f[ilma, i], M.f[claudia, i]
+        manha[i] = mi = M.bool()
+        # Daniel na manhã quando só Ilma folga; dobra quando as duas folgam
+        M.m.AddBoolAnd([fi, fc.Not()]).OnlyEnforceIf(mi)
+        M.m.AddBoolOr([fi.Not(), fc, mi])
+        bi = M.b[daniel, i]
+        M.m.AddBoolAnd([fi, fc]).OnlyEnforceIf(bi)
+        M.m.AddBoolOr([fi.Not(), fc.Not(), bi])
+    # Descanso de 11h: Daniel só entra às 08:00 se na véspera folgou, fez manhã ou era domingo
+    for i, mi in manha.items():
+        ontem = i - 1
+        if ontem < 0 or not dia_aberto(ontem) or eh_domingo(ontem):
             continue
-        for faltam_de, cobrem in ((manha, noite), (noite, manha)):
-            faltas = sum(1 for p in faltam_de if sts[p][i] == "F")
-            candidatos = [p for p in cobrem if sts[p][i] == "W" and pode_dobrar_no_dia(p, i)
-                          and cods[p][i] == "T"]
-
-            def ordem(p):
-                ontem = 1 if i > 0 and cods[p][i - 1] == "B" else 0
-                return (dobras[p] / p.peso_dobra + ontem * 0.75, p.nome)
-
-            candidatos.sort(key=ordem)
-            for p in candidatos[:faltas]:
-                cods[p][i] = "B"
-                dobras[p] += 1
-    return cods
+        opcoes = [M.f[daniel, ontem]] + ([manha[ontem]] if ontem in manha else [])
+        M.m.AddBoolOr(opcoes).OnlyEnforceIf(mi)
+    pontos, status = M.resolver(30)
+    return {p: M.codigos(p, manha if p is daniel else None) for p in pessoas}, pontos, status
 
 
 def montar_escala():
-    """Devolve {setor: {pessoa: [códigos por dia]}} e a pontuação de cada setor."""
-    escala, pontos = {}, {}
-    from modelo import BAR, COZINHA, PIA, REFEITORIO, SALAO_EQUIPE, SUSHI
-
+    """Devolve {setor: {pessoa: [códigos por dia]}} e a situação do otimizador por setor."""
+    escala, situacao = {}, {}
     for nome, pessoas in (("Bar", BAR), ("Sushi", SUSHI)):
-        sts, pontos[nome] = resolver_setor(pessoas, custo_dia_dupla)
-        escala[nome] = codigos_dupla(pessoas, sts)
-
-    extras = {p: EXTRAS[(p.setor, p.nome)] for p in SALAO_EQUIPE if (p.setor, p.nome) in EXTRAS}
-    sts, pontos["Salão"] = resolver_setor(SALAO_EQUIPE, custo_dia_salao, extras)
-    escala["Salão"] = {p: codigos_basicos(sts[p]) for p in SALAO_EQUIPE}
-
-    extras = {p: EXTRAS[(p.setor, p.nome)] for p in COZINHA if (p.setor, p.nome) in EXTRAS}
-    sts_coz, pontos["Cozinha"] = resolver_setor(COZINHA, custo_dia_cozinha, extras, iteracoes=250000)
-    escala["Cozinha"] = codigos_cozinha(COZINHA, sts_coz)
-
-    sts, pontos["Pia"] = resolver_setor(PIA, custo_dia_pia)
-    escala["Pia"] = codigos_pia(PIA, sts)
-
-    rafael_coz = next(p for p in COZINHA if p.nome == "Rafael")
-    joelma = REFEITORIO[0]
-    sts, pontos["Refeitório"] = resolver_setor(
-        REFEITORIO, custo_dia_nenhum, {joelma: extra_joelma(sts_coz[rafael_coz])})
-    escala["Refeitório"] = {joelma: codigos_basicos(sts[joelma])}
-    return escala, pontos
+        escala[nome], *situacao[nome] = dupla(pessoas)
+    escala["Salão"], *situacao["Salão"] = salao(SALAO_EQUIPE)
+    (escala["Cozinha"], escala["Refeitório"]), *situacao["Cozinha + Refeitório"] = \
+        cozinha_e_refeitorio(COZINHA, REFEITORIO)
+    escala["Pia"], *situacao["Pia"] = pia(PIA)
+    ordem = ["Bar", "Sushi", "Salão", "Cozinha", "Pia", "Refeitório"]
+    return {s: escala[s] for s in ordem}, situacao
