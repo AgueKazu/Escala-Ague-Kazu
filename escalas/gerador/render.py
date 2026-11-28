@@ -22,11 +22,13 @@ TXT = {'T': '', 'F': 'F', 'FEC': 'FER', 'D': 'D', 'DOM': 'DOM'}
 FONTE_BRANCA = {'F', 'FEC', 'D'}
 NOMES_SETOR = {'Cozinha': 'Cozinha (manhã e noite)'}
 
+OCULTOS = {'Edna', 'Moura'}  # não aparecem na tabela, mas contam na equipe da manhã
+
 def linhas(setor):
     """Lista de ('grupo', titulo) ou ('pessoa', nome)."""
     g = G[setor]
     if setor == 'Cozinha':
-        out = [('grupo', 'Turno da manhã')] + [('pessoa', p.nome) for p in coz if p.turno == 'M']
+        out = [('grupo', 'Turno da manhã')] + [('pessoa', p.nome) for p in coz if p.turno == 'M' and p.nome not in OCULTOS]
         out += [('grupo', 'Turno da noite')] + [('pessoa', p.nome) for p in coz if p.turno == 'N']
         return out
     return [('pessoa', n) for n in g]
@@ -55,7 +57,7 @@ OBS_SETOR = {
            'Nos dias de folga da Juliana, ficam pelo menos 5 pessoas trabalhando. Sivanilda folga 19/12 e Marcos 26/12.'],
  'Cozinha': ['Manhã sempre com 7 e noite sempre com 6 (segunda a sábado): quem falta é coberto por dobra do outro turno.',
              'Rony, Edna e Moura não fazem dobra; Rafael não faz dobra às terças e quartas.',
-             'Moura folga toda segunda e terça; Edna folga todo sábado e domingo; Miro folga 07/12, 21/12, 04/01 e 18/01 (segundas) e no 4º domingo.',
+             'Edna e Moura não aparecem na tabela, mas contam no turno da manhã. Miro folga 07/12, 21/12, 04/01 e 18/01 (segundas) e no 4º domingo.',
              'Rafael folga no 3º domingo. Miro, Rafael e Chef nunca folgam no mesmo dia. Domingos (10:30–19:54) sem dobra.'],
  'Pia': ['Daniel cobre as folgas da Ilma (com dobra) e da Claudia. Ilma e Claudia nunca folgam no mesmo dia.',
          'Mulheres com 2 domingos de folga por mês, a cada 15 dias; Daniel com 1.'],
@@ -160,72 +162,86 @@ def escrever(cell, txt, tam=6, neg=False, branco=False, ital=False, alin=WD_ALIG
     if branco: run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
 doc = Document()
-st = doc.styles['Normal']; st.font.name = 'Calibri'; st.font.size = Pt(8)
+st = doc.styles['Normal']; st.font.name = 'Calibri'; st.font.size = Pt(9)
 sec = doc.sections[0]
 sec.orientation = WD_ORIENT.LANDSCAPE
 sec.page_width, sec.page_height = Cm(29.7), Cm(21.0)
-for a in ('left_margin', 'right_margin'): setattr(sec, a, Cm(0.8))
-for a in ('top_margin', 'bottom_margin'): setattr(sec, a, Cm(0.8))
-LARG = [Cm(1.9), Cm(2.9)] + [Cm(0.67)] * 31 + [Cm(0.9), Cm(0.9)]
+for a in ('left_margin', 'right_margin', 'top_margin', 'bottom_margin'): setattr(sec, a, Cm(0.9))
+LARG = [Cm(2.4), Cm(2.4)] + [Cm(0.68)] * 31 + [Cm(1.0), Cm(1.0)]
 
-for k, setor in enumerate(ORDEM):
-    if k: doc.add_page_break()
-    h = doc.add_paragraph(); r_ = h.add_run(f'Escala 5x2 – {NOMES_SETOR.get(setor, setor)}'); r_.bold = True; r_.font.size = Pt(14)
-    h.paragraph_format.space_after = Pt(2)
-    for mi, (titulo, dias) in enumerate(MESES):
+def altura(row, cm):
+    trPr = row._tr.get_or_add_trPr()
+    h = OxmlElement('w:trHeight'); h.set(qn('w:val'), str(int(Cm(cm).twips))); h.set(qn('w:hRule'), 'atLeast'); trPr.append(h)
+def centralizar_vert(cell):
+    v = OxmlElement('w:vAlign'); v.set(qn('w:val'), 'center'); cell._tc.get_or_add_tcPr().append(v)
+
+primeira = True
+for setor in ORDEM:
+    for titulo, dias in MESES:
         dias = list(dias)
-        if setor == 'Cozinha' and mi == 1: doc.add_page_break()
-        p = doc.add_paragraph(); rr = p.add_run(titulo); rr.bold = True; rr.font.size = Pt(10)
-        p.paragraph_format.space_before = Pt(4); p.paragraph_format.space_after = Pt(2)
+        if not primeira: doc.add_page_break()
+        primeira = False
+        h = doc.add_paragraph(); h.paragraph_format.space_after = Pt(6)
+        r_ = h.add_run(f'Escala 5x2 – {NOMES_SETOR.get(setor, setor)}'); r_.bold = True; r_.font.size = Pt(18)
+        r2 = h.add_run(f'    {titulo}'); r2.bold = True; r2.font.size = Pt(14); r2.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
         ls = linhas(setor)
-        extra = 2 if setor == 'Cozinha' else (1 if len(G[setor]) > 2 else 0)
-        t = doc.add_table(rows=2 + len(ls) + extra, cols=35)
+        n_pessoas = sum(1 for t_, _ in ls if t_ == 'pessoa')
+        rots = ['Manhã (meta 7)', 'Noite (meta 6)'] if setor == 'Cozinha' else (['Trabalhando'] if n_pessoas > 2 else [])
+        t = doc.add_table(rows=2 + len(ls) + len(rots), cols=35)
         t.style = 'Table Grid'; t.alignment = WD_TABLE_ALIGNMENT.CENTER; t.autofit = False
-        margens_cel(t)
+        margens_cel(t, 15)
         for j, w in enumerate(LARG):
             for row in t.rows: row.cells[j].width = w
         lay = OxmlElement('w:tblLayout'); lay.set(qn('w:type'), 'fixed'); t._tbl.tblPr.append(lay)
         for gc, w in zip(t._tbl.tblGrid.findall(qn('w:gridCol')), LARG): gc.set(qn('w:w'), str(int(w.twips)))
-        cab = ['Funcionário', 'Horário'] + [DATAS[i].strftime('%d/%m') for i in dias] + ['Folgas', 'Dobras']
-        for j, v in enumerate(cab):
-            c = t.cell(0, j); sombrear(c, COR['cinza']); escrever(c, v, 5.5 if 2 <= j < 33 else 6.5, True)
+        alt_pessoa = 1.4 if n_pessoas <= 3 else (1.1 if n_pessoas <= 8 else 0.9)
+        for row in t.rows:
+            for c in row.cells: centralizar_vert(c)
+        # cabeçalho: dia e dia da semana
+        altura(t.rows[0], 0.6); altura(t.rows[1], 0.5)
         for j in range(35):
-            c = t.cell(1, j); sombrear(c, COR['cinza'])
-            if 2 <= j < 33: escrever(c, SEM[dias[j-2] % 7], 5.5, True)
+            for r in (0, 1): sombrear(t.cell(r, j), COR['cinza'])
+        c = t.cell(0, 0).merge(t.cell(1, 0)); escrever(c, 'Funcionário', 9, True)
+        c = t.cell(0, 1).merge(t.cell(1, 1)); escrever(c, 'Horário', 9, True)
+        c = t.cell(0, 33).merge(t.cell(1, 33)); escrever(c, 'Folgas', 7.5, True)
+        c = t.cell(0, 34).merge(t.cell(1, 34)); escrever(c, 'Dobras', 7.5, True)
+        for j, i in enumerate(dias, 2):
+            escrever(t.cell(0, j), DATAS[i].strftime('%d'), 9, True)
+            escrever(t.cell(1, j), SEM[i % 7], 7, True)
         ri = 2
         for tipo, nome in ls:
             if tipo == 'grupo':
-                c = t.cell(ri, 0).merge(t.cell(ri, 34)); escrever(c, nome, 7, True, ital=True, alin=WD_ALIGN_PARAGRAPH.LEFT)
-                ri += 1; continue
+                c = t.cell(ri, 0).merge(t.cell(ri, 34)); escrever(c, nome, 9, True, ital=True, alin=WD_ALIGN_PARAGRAPH.LEFT)
+                altura(t.rows[ri], 0.5); ri += 1; continue
+            altura(t.rows[ri], alt_pessoa)
             row = G[setor][nome]
-            escrever(t.cell(ri, 0), nome, 7, True, alin=WD_ALIGN_PARAGRAPH.LEFT)
-            escrever(t.cell(ri, 1), HOR[setor][nome].replace(' int.', ''), 5.5, alin=WD_ALIGN_PARAGRAPH.LEFT)
+            escrever(t.cell(ri, 0), nome, 10, True, alin=WD_ALIGN_PARAGRAPH.LEFT)
+            escrever(t.cell(ri, 1), HOR[setor][nome].replace(' int.', ''), 7.5, alin=WD_ALIGN_PARAGRAPH.LEFT)
             for j, i in enumerate(dias, 2):
-                s = row[i]; c = t.cell(ri, j)
-                cor = COR['DOM'] if (s == 'T' and i % 7 == 6) else COR[s]
+                s_ = row[i]; c = t.cell(ri, j)
+                cor = COR['DOM'] if (s_ == 'T' and i % 7 == 6) else COR[s_]
                 if cor != 'FFFFFF': sombrear(c, cor)
-                escrever(c, TXT[s], 5.5, True, branco=s in FONTE_BRANCA)
-            escrever(t.cell(ri, 33), sum(1 for i in dias if row[i] == 'F'), 7, True)
-            escrever(t.cell(ri, 34), sum(1 for i in dias if row[i] == 'D'), 7, True)
+                escrever(c, TXT[s_], 7.5 if len(TXT[s_]) > 1 else 9, True, branco=s_ in FONTE_BRANCA)
+            escrever(t.cell(ri, 33), sum(1 for i in dias if row[i] == 'F'), 10, True)
+            escrever(t.cell(ri, 34), sum(1 for i in dias if row[i] == 'D'), 10, True)
             ri += 1
-        rots = ['Manhã (7)', 'Noite (6)'] if setor == 'Cozinha' else (['Trabalhando'] if extra else [])
         for kk, rot in enumerate(rots):
-            c = t.cell(ri, 0).merge(t.cell(ri, 1)); escrever(c, rot, 6, ital=True, alin=WD_ALIGN_PARAGRAPH.LEFT)
+            altura(t.rows[ri], 0.5)
+            c = t.cell(ri, 0).merge(t.cell(ri, 1)); escrever(c, rot, 8, ital=True, alin=WD_ALIGN_PARAGRAPH.LEFT)
             for j, i in enumerate(dias, 2):
                 v = contagem(setor, i)
-                if v is not None: escrever(t.cell(ri, j), v[kk] if setor == 'Cozinha' else v, 5.5, ital=True)
+                if v is not None: escrever(t.cell(ri, j), v[kk] if setor == 'Cozinha' else v, 8, ital=True)
             ri += 1
-    # legenda
-    p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(6); p.paragraph_format.space_after = Pt(0)
-    itens = LEGENDA + [('cinza', 'Datas')]
-    for s_, txt in itens:
-        rn = p.add_run(f' {TXT.get(s_, "dd/mm")} '); rn.bold = True; rn.font.size = Pt(7)
-        if s_ in FONTE_BRANCA: rn.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        shd = OxmlElement('w:shd'); shd.set(qn('w:val'), 'clear'); shd.set(qn('w:color'), 'auto'); shd.set(qn('w:fill'), COR[s_])
-        rn._r.get_or_add_rPr().append(shd)
-        rt = p.add_run(f' {txt}     '); rt.font.size = Pt(7)
-    for o in OBS_SETOR[setor] + OBS:
-        q = doc.add_paragraph('• ' + o); q.paragraph_format.space_after = Pt(0)
-        for rn in q.runs: rn.font.size = Pt(7)
+        # legenda
+        p = doc.add_paragraph(); p.paragraph_format.space_before = Pt(8); p.paragraph_format.space_after = Pt(3)
+        for s_, txt in LEGENDA + [('cinza', 'Datas')]:
+            rn = p.add_run(f' {TXT.get(s_, "dd")} '); rn.bold = True; rn.font.size = Pt(9)
+            if s_ in FONTE_BRANCA: rn.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            shd = OxmlElement('w:shd'); shd.set(qn('w:val'), 'clear'); shd.set(qn('w:color'), 'auto'); shd.set(qn('w:fill'), COR[s_])
+            rn._r.get_or_add_rPr().append(shd)
+            rt = p.add_run(f' {txt}    '); rt.font.size = Pt(9)
+        for o in OBS_SETOR[setor] + OBS:
+            q = doc.add_paragraph('• ' + o); q.paragraph_format.space_after = Pt(0)
+            for rn in q.runs: rn.font.size = Pt(8.5)
 doc.save(f'{OUT}/escala-dez2026-jan2027.docx')
 print('ok')
